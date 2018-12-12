@@ -15,22 +15,35 @@ const (
 	DEFAULT_DNS1       = "8.8.8.8"
 	DEFAULT_DNS2       = "1.1.1.1"
 	DEFAULT_PORT       = "53"
-	DEFAULT_TIMEOUT    = 3 * time.Second
+	DEFAULT_TIMEOUT    = 5 * time.Second
 	DEFAULT_RETRYTIMES = 3
+	DEFAULT_PROTOCOLv4 = "udp4"
+
+	QR = 1 << 15 //query=0 (from client), response=1 (from server)
+	AA = 1 << 10 //authority response (from server)
+	TC = 1 << 9  //truncated response (from server)
+	RD = 1 << 8  //recursion desired (from client)
+	RA = 1 << 7  //recursion available (from server)
+	AD = 1 << 5  //true data (from both server and client <-> RFC4035)
+	CD = 1 << 4  //verify forbidden (from both server and client <-> RFC4035)
 )
 
 var (
+	//errors in DNS response
 	NoErr       = errors.New("Everything OK")
 	FormErr     = errors.New("Incorrect format")
 	ServerFail  = errors.New("Server could't handle it")
 	NXDomainErr = errors.New("Domain not exist")
 	NotImpErr   = errors.New("Query not supported")
 	RefuseErr   = errors.New("Query refused by server")
+
+	DomainLenErr     = errors.New("Domain name over max length(255)")
+	DomainInvalidErr = errors.New("Invalid characters in domain name")
 )
 
 type DNSHeader struct {
 	TransctionID uint16
-	Flagss       uint16
+	Flags        uint16
 	QDOrZOCount  uint16
 	ANOrPRCount  uint16
 	NSOrUPCount  uint16
@@ -80,8 +93,82 @@ func (client *dnsclient) Dnsquery(domain string, dnsserver []string) (map[string
 				return
 			}
 
+			hd := makeQueryHeader()
+			bHeader := []byte{byte(hd.Flags >> 8), byte(hd.Flags),
+				byte(hd.QDOrZOCount >> 8), byte(hd.QDOrZOCount),
+				byte(hd.ANOrPRCount >> 8), byte(hd.ANOrPRCount),
+				byte(hd.NSOrUPCount >> 8), byte(hd.NSOrUPCount),
+				byte(hd.AROrADCount >> 8), byte(hd.AROrADCount)}
+
+			bquerymsg, err := makeQueryMsg(domain)
+			if err != nil {
+				fnerr = err
+				return
+			}
+
+			udpaddr, err := net.ResolveUDPAddr(DEFAULT_PROTOCOLv4, srvaddr)
+			if err != nil {
+				fnerr = err
+				return
+			}
+
+			udpcon, err := net.DialUDP(DEFAULT_PROTOCOLv4, nil, udpaddr)
+			if err != nil {
+				fnerr = err
+				return
+			}
+			udpcon.SetDeadline()
+
 		}(server)
 	}
+}
+
+//return dns header of standard query
+func makeQueryHeader() *DNSHeader {
+	header := new(DNSHeader)
+	header.Flags = 0 | RD | AD //or header.Flags=0x0120
+	header.QDOrZOCount = 1     //query count=1
+	header.ANOrPRCount = 0
+	header.NSOrUPCount = 0
+	header.AROrADCount = 1 //additional infomation count=1
+	return header
+}
+
+//
+func makeQueryMsg(domainname string) ([]byte, error) {
+	var result []byte
+	//length of FQDN <= 255 bytes
+	if len(domainname) > 255 {
+		return result, DomainLenErr
+	}
+
+	fields, err := getFields(domainname)
+	if err != nil {
+		return result, err
+	}
+
+	for _, tag := range fields {
+		if len(tag) == 0 {
+			continue
+		}
+		lentag := append([]byte{}, byte(len(tag)))
+		tmptag := append(lentag, []byte(tag)...)
+		result = append(result, tmptag...)
+	}
+
+	return result, nil
+}
+
+func getFields(src string) ([]string, error) {
+	//use ascii only, as Punycode not so universal
+	for ch := range src {
+		if (ch < '0') || (ch > '9' && ch < 'A') || (ch > 'Z' && ch < 'a') || (ch > 'z') {
+			return []string{}, DomainInvalidErr
+		}
+	}
+
+	return strings.SplitN(src, ".", 4), nil
+
 }
 
 //read system dns config from /etc/resolv.conf
