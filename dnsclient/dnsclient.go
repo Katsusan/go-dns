@@ -3,10 +3,14 @@ package dnsclient
 import (
 	"bytes"
 	"errors"
+	"log"
+	"math/rand"
 	"net"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -26,6 +30,7 @@ const (
 	RA = 1 << 7  //recursion available (from server)
 	AD = 1 << 5  //true data (from both server and client <-> RFC4035)
 	CD = 1 << 4  //verify forbidden (from both server and client <-> RFC4035)
+
 )
 
 var (
@@ -39,6 +44,11 @@ var (
 
 	DomainLenErr     = errors.New("Domain name over max length(255)")
 	DomainInvalidErr = errors.New("Invalid characters in domain name")
+
+	QUERY_TYPE_A   = []byte{0x0, 0x1} //query ipv4
+	QUERY_CLASS_IN = []byte{0x0, 0x1}
+
+	syscfg *dnsConfig
 )
 
 type DNSHeader struct {
@@ -50,7 +60,7 @@ type DNSHeader struct {
 	AROrADCount  uint16
 }
 
-type dnsclient struct {
+type Dnsclient struct {
 	conn *net.Conn
 }
 
@@ -61,16 +71,21 @@ type dnsConfig struct {
 	err         error
 }
 
-//GenTransactionID will return 16bit transaction ID(for matching different queries)
-func GenTransactionID() uint16 {
-	var transID uint16
+//GenTransactionID will help generate 16bit transaction ID(for matching concurrent queries )
+//formula: BasicTransID + n * Step
+func GenTransactionID() (uint16, uint16) {
+	var BasicTransID uint16
+	var Step uint16
 
-	//unixnano := time.Now().UnixNano()
+	unixnano := time.Now().UnixNano()
+	r := rand.New(rand.NewSource(unixnano))
+	BasicTransID = uint16(r.Int31n(65536))
+	Step = uint16(r.Int31n(255))
 
-	return transID
+	return BasicTransID, Step
 }
 
-func (client *dnsclient) Dnsquery(domain string, dnsserver []string) (map[string]string, error) {
+func (client *Dnsclient) DnsQuery(domain string, dnsserver []string) (map[string]string, error) {
 	var fnerr error
 	result := make(map[string]string)
 	dnslist := dnsserver
@@ -80,8 +95,13 @@ func (client *dnsclient) Dnsquery(domain string, dnsserver []string) (map[string
 		dnslist = syscfg.nameservers
 	}
 
-	for _, server := range dnslist {
+	var wg sync.WaitGroup
+	wg.Add(len(dnslist))
+	bTransID, step := GenTransactionID()
+
+	for k, server := range dnslist {
 		go func(srvaddr string) {
+			defer wg.Done()
 			if !strings.Contains(srvaddr, ":") {
 				if net.ParseIP(srvaddr) == nil {
 					fnerr = errors.New("Invalid IP format")
@@ -92,6 +112,9 @@ func (client *dnsclient) Dnsquery(domain string, dnsserver []string) (map[string
 				fnerr = errors.New("Invalid IP:Host format")
 				return
 			}
+
+			TransID := bTransID + uint16(k)*step
+			bTransID := []byte{byte(TransID >> 8), byte(TransID)}
 
 			hd := makeQueryHeader()
 			bHeader := []byte{byte(hd.Flags >> 8), byte(hd.Flags),
@@ -112,15 +135,64 @@ func (client *dnsclient) Dnsquery(domain string, dnsserver []string) (map[string
 				return
 			}
 
+			//issue UDP connect
 			udpcon, err := net.DialUDP(DEFAULT_PROTOCOLv4, nil, udpaddr)
 			if err != nil {
 				fnerr = err
 				return
 			}
-			udpcon.SetDeadline()
+			defer udpcon.Close()
+
+			//get local udp address as DNS server will respond to the same ip:port
+			localudpaddr, err := net.ResolveUDPAddr(DEFAULT_PROTOCOLv4, udpcon.LocalAddr().String())
+			if err != nil {
+				fnerr = err
+				return
+			}
+
+			//listen for dns response, as ttl may smaller than listen->send's execute time, so listen better before send
+			log.Println("will listen at", localudpaddr)
+			recvcon, err := net.ListenUDP(DEFAULT_PROTOCOLv4, localudpaddr)
+			if err != nil {
+				fnerr = err
+				return
+			}
+			defer recvcon.Close()
+
+			//set wait timeout
+			recvcon.SetDeadline(time.Now().Add(syscfg.timeout))
+
+			//send dns query msg
+			msgall := append(append(bTransID, bHeader...), bquerymsg...)
+			wn, err := udpcon.Write(msgall)
+			if err != nil {
+				fnerr = err
+				return
+			}
+			log.Printf("write bytes:%d\n", wn)
+
+			//read response
+			rc := make([]byte, 512)
+			var rn int
+			for {
+				rn, _, err := recvcon.ReadFrom(rc)
+				if err != nil {
+					fnerr = err
+					return
+				}
+				if rn > 0 {
+					log.Printf("recv: %X\n", rc)
+					break
+				}
+			}
+
+			log.Printf("length: %d,\nresponse: %s\n", rn, rc)
 
 		}(server)
 	}
+
+	wg.Wait()
+	return result, nil
 }
 
 //return dns header of standard query
@@ -130,7 +202,7 @@ func makeQueryHeader() *DNSHeader {
 	header.QDOrZOCount = 1     //query count=1
 	header.ANOrPRCount = 0
 	header.NSOrUPCount = 0
-	header.AROrADCount = 1 //additional infomation count=1
+	header.AROrADCount = 0 //usually additional records count not set
 	return header
 }
 
@@ -147,6 +219,7 @@ func makeQueryMsg(domainname string) ([]byte, error) {
 		return result, err
 	}
 
+	//buidl domainname to dns query format, eg: "baidu.com" -> "5baidu3com0"
 	for _, tag := range fields {
 		if len(tag) == 0 {
 			continue
@@ -155,14 +228,21 @@ func makeQueryMsg(domainname string) ([]byte, error) {
 		tmptag := append(lentag, []byte(tag)...)
 		result = append(result, tmptag...)
 	}
+	result = append(result, byte(0x0))
+
+	//add query type, if query ipv4 address then type is A (0x01)
+	result = append(result, QUERY_TYPE_A...)
+
+	//add query class, usually class is IN (0x01)
+	result = append(result, QUERY_CLASS_IN...)
 
 	return result, nil
 }
 
 func getFields(src string) ([]string, error) {
 	//use ascii only, as Punycode not so universal
-	for ch := range src {
-		if (ch < '0') || (ch > '9' && ch < 'A') || (ch > 'Z' && ch < 'a') || (ch > 'z') {
+	for _, ch := range src {
+		if (ch < '0' && ch != '.') || (ch > '9' && ch < 'A') || (ch > 'Z' && ch < 'a') || (ch > 'z') {
 			return []string{}, DomainInvalidErr
 		}
 	}
@@ -171,7 +251,8 @@ func getFields(src string) ([]string, error) {
 
 }
 
-//read system dns config from /etc/resolv.conf
+//*nix: read system dns config from /etc/resolv.conf
+//windows: use defaultcfg
 func readsystemcfg() *dnsConfig {
 	var err error
 	var conf *dnsConfig
@@ -180,6 +261,10 @@ func readsystemcfg() *dnsConfig {
 		timeout:     DEFAULT_TIMEOUT,
 		retrytimes:  DEFAULT_RETRYTIMES,
 		err:         nil,
+	}
+
+	if runtime.GOOS == "windows" {
+		return defaultcfg
 	}
 
 	file, err := os.Open(UNIX_CONFIG_FILE)
