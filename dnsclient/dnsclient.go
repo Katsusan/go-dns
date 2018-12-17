@@ -3,6 +3,7 @@ package dnsclient
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"log"
 	"math/rand"
 	"net"
@@ -31,6 +32,23 @@ const (
 	AD = 1 << 5  //true data (from both server and client <-> RFC4035)
 	CD = 1 << 4  //verify forbidden (from both server and client <-> RFC4035)
 
+	DNS_HEADER_LENGTH = 12
+
+	//DNS中的RR类型
+	RR_TYPE_A     = 1 //IPv4地址
+	RR_TYPE_NS    = 2 //Name Server，名称服务器
+	RR_TYPE_CNAME = 5
+	RR_TYPE_SOA   = 6
+	RR_TYPE_PTR   = 12
+	RR_TYPE_MX    = 15 //邮件交换器，为域提供电子邮件处理主机的名称
+	RR_TYPE_TXT   = 16
+	RR_TYPE_AAAA  = 28 //IPv6地址
+	RR_TYPE_SRV   = 33
+	RR_TYPE_NAPTR = 35
+	RR_TYPE_OPT   = 41
+	RR_TYPE_IXFR  = 251 //增量区域传输
+	RR_TYPE_AXFR  = 252
+	RR_TYPE_ANY   = 255
 )
 
 var (
@@ -47,6 +65,26 @@ var (
 
 	QUERY_TYPE_A   = []byte{0x0, 0x1} //query ipv4
 	QUERY_CLASS_IN = []byte{0x0, 0x1}
+
+	mapRRType = map[uint16]string{
+		1:   "A",
+		2:   "NS",
+		5:   "CNAME",
+		6:   "SOA",
+		12:  "PTR",
+		15:  "MX",
+		16:  "TXT",
+		28:  "AAAA",
+		33:  "SRV",
+		35:  "NAPTR",
+		41:  "OPT",
+		251: "IXFR",
+		255: "ANY",
+	}
+
+	mapRRClass = map[uint16]string{
+		1: "IN",
+	}
 
 	syscfg *dnsConfig
 )
@@ -71,6 +109,20 @@ type dnsConfig struct {
 	err         error
 }
 
+type DNSResponse struct {
+	FromServer string
+	Answer     []DNSAnswer
+}
+
+type DNSAnswer struct {
+	Name    string
+	RRType  string
+	Class   string
+	TTL     uint32
+	DataLen uint16
+	Ip      string
+}
+
 //GenTransactionID will help generate 16bit transaction ID(for matching concurrent queries )
 //formula: BasicTransID + n * Step
 func GenTransactionID() (uint16, uint16) {
@@ -85,23 +137,25 @@ func GenTransactionID() (uint16, uint16) {
 	return BasicTransID, Step
 }
 
-func (client *Dnsclient) DnsQuery(domain string, dnsserver []string) (map[string]string, error) {
+func (client *Dnsclient) DnsQuery(domain string, dnsserver []string) ([]DNSResponse, error) {
 	var fnerr error
-	result := make(map[string]string)
+	result := make([]DNSResponse, len(dnsserver))
 	dnslist := dnsserver
+	syscfg = readsystemcfg()
 	if len(dnsserver) == 0 {
 		//use system default DNS server
-		syscfg := readsystemcfg()
 		dnslist = syscfg.nameservers
 	}
 
 	var wg sync.WaitGroup
 	wg.Add(len(dnslist))
-	bTransID, step := GenTransactionID()
+	baseTransID, step := GenTransactionID()
 
 	for k, server := range dnslist {
 		go func(srvaddr string) {
 			defer wg.Done()
+
+			var retry int8
 			if !strings.Contains(srvaddr, ":") {
 				if net.ParseIP(srvaddr) == nil {
 					fnerr = errors.New("Invalid IP format")
@@ -113,8 +167,8 @@ func (client *Dnsclient) DnsQuery(domain string, dnsserver []string) (map[string
 				return
 			}
 
-			TransID := bTransID + uint16(k)*step
-			bTransID := []byte{byte(TransID >> 8), byte(TransID)}
+			TransID := baseTransID + uint16(k)*step
+			bTransID := []byte{byte(TransID >> 8), byte(TransID)} //16bit's unique tansaction id
 
 			hd := makeQueryHeader()
 			bHeader := []byte{byte(hd.Flags >> 8), byte(hd.Flags),
@@ -135,6 +189,13 @@ func (client *Dnsclient) DnsQuery(domain string, dnsserver []string) (map[string
 				return
 			}
 
+			//set timer for timeout (after syscfg.timeout of time, will send true to timout channel)
+			/*tmr := time.AfterFunc(syscfg.timeout, func() {
+				log.Printf("goroutine[%d] timeout\n", k)
+				tmout[k] <- true
+			})*/
+
+		STARTQUERY:
 			//issue UDP connect
 			udpcon, err := net.DialUDP(DEFAULT_PROTOCOLv4, nil, udpaddr)
 			if err != nil {
@@ -172,26 +233,41 @@ func (client *Dnsclient) DnsQuery(domain string, dnsserver []string) (map[string
 			log.Printf("write bytes:%d\n", wn)
 
 			//read response
-			rc := make([]byte, 512)
+			dnsresp := new(DNSResponse)
+			rc := make([]byte, 512) //usually DNS response length < 512 byte
 			var rn int
 			for {
-				rn, _, err := recvcon.ReadFrom(rc)
+				rn, _, err = recvcon.ReadFrom(rc)
 				if err != nil {
-					fnerr = err
-					return
+					//try to make dns query again
+					if retry < syscfg.retrytimes {
+						log.Printf("retry to dns query again,[%d]\n ", retry)
+						retry++
+						goto STARTQUERY
+					} else {
+						//over the max retry times
+						fnerr = err
+						return
+					}
 				}
-				if rn > 0 {
+
+				//transaction ID is consistent
+				if rn > DNS_HEADER_LENGTH && bytes.Equal(bTransID, rc[0:2]) {
 					log.Printf("recv: %X\n", rc)
+					if dnsresp, err = ParseResp(rc[2:]); err != nil {
+						continue
+					}
 					break
 				}
 			}
-
+			log.Printf("dnsresponse: %+v\n", dnsresp)
 			log.Printf("length: %d,\nresponse: %s\n", rn, rc)
 
 		}(server)
 	}
 
 	wg.Wait()
+	log.Println(fnerr)
 	return result, nil
 }
 
@@ -251,7 +327,7 @@ func getFields(src string) ([]string, error) {
 
 }
 
-//*nix: read system dns config from /etc/resolv.conf
+//Linux: read system dns config from /etc/resolv.conf
 //windows: use defaultcfg
 func readsystemcfg() *dnsConfig {
 	var err error
@@ -263,6 +339,7 @@ func readsystemcfg() *dnsConfig {
 		err:         nil,
 	}
 
+	//if OS is windows then don't read from resolv.conf(use the default)
 	if runtime.GOOS == "windows" {
 		return defaultcfg
 	}
@@ -323,4 +400,54 @@ func readsystemcfg() *dnsConfig {
 		conf.retrytimes = DEFAULT_RETRYTIMES
 	}
 	return conf
+}
+
+func ParseResp(src []byte) (*DNSResponse, error) {
+	var err error
+	dnsresponse := new(DNSResponse)
+	//verify QR(1->response) and OpCode(0000->normal query)
+	//that is , whether src[0] is euqal to 10000xxx
+	if (src[0] >> 3) != 0x10 {
+		err = errors.New("QR or OpCode not correct.(should be 10000)")
+		return dnsresponse, err
+	}
+
+	//verify Reply Code(0000->no error)
+	//that is , whether src[1] is equal to xxxx0000
+	if (src[1] << 4) != 0x0 {
+		err = errors.New("reply code not correct.(should be 0000)")
+		return dnsresponse, err
+	}
+
+	RRnum := uint16(src[4])*256 + uint16(src[5])
+	if RRnum < 1 {
+		err = errors.New("RR number is 0")
+		return dnsresponse, err
+	}
+
+	//look for 0xc00c(which indicates the first index of the domain name if it is repeated)
+	firsti := bytes.Index(src, []byte{0xc0, 0x0c})
+	if firsti == -1 {
+		err = errors.New("domain name not found in response")
+		return dnsresponse, err
+	}
+
+	for l := 0; l < int(RRnum); l++ {
+		anstype := mapRRType[uint16(src[firsti+2])*256+uint16(src[firsti+3])]
+		ansclass := mapRRClass[uint16(src[firsti+4])*256+uint16(src[firsti+5])]
+		ansttl := uint32(src[firsti+6]<<24) + uint32(src[firsti+7]<<16) +
+			uint32(src[firsti+8]<<8) + uint32(src[firsti+9])
+		ansdatalen := uint16(src[firsti+10]>>8) + uint16(src[firsti+11])
+		ansip := fmt.Sprint(net.IPv4(src[firsti+12], src[firsti+13], src[firsti+14], src[firsti+15]))
+		dnsresponse.Answer = append(dnsresponse.Answer, DNSAnswer{
+			RRType:  anstype,
+			Class:   ansclass,
+			TTL:     ansttl,
+			DataLen: ansdatalen,
+			Ip:      ansip,
+		})
+		firsti = firsti + 16
+	}
+
+	return dnsresponse, err
 }
