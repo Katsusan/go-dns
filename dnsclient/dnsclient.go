@@ -139,7 +139,7 @@ func GenTransactionID() (uint16, uint16) {
 
 func (client *Dnsclient) DnsQuery(domain string, dnsserver []string) ([]DNSResponse, error) {
 	var fnerr error
-	result := make([]DNSResponse, len(dnsserver))
+	result := make([]DNSResponse, 0)
 	dnslist := dnsserver
 	syscfg = readsystemcfg()
 	if len(dnsserver) == 0 {
@@ -149,12 +149,15 @@ func (client *Dnsclient) DnsQuery(domain string, dnsserver []string) ([]DNSRespo
 
 	var wg sync.WaitGroup
 	wg.Add(len(dnslist))
+	queue := make(chan *DNSResponse, 1) // for receviving different responses from goroutines
 	baseTransID, step := GenTransactionID()
 
 	for k, server := range dnslist {
-		go func(srvaddr string) {
-			defer wg.Done()
+		go func(srvaddr string, srvi int) {
+			//defer wg.Done()
 
+			dnsresp := new(DNSResponse)
+			log.Printf("start->server:%s, serveri:%d\n", srvaddr, srvi)
 			var retry int8
 			if !strings.Contains(srvaddr, ":") {
 				if net.ParseIP(srvaddr) == nil {
@@ -167,7 +170,7 @@ func (client *Dnsclient) DnsQuery(domain string, dnsserver []string) ([]DNSRespo
 				return
 			}
 
-			TransID := baseTransID + uint16(k)*step
+			TransID := baseTransID + uint16(srvi)*step
 			bTransID := []byte{byte(TransID >> 8), byte(TransID)} //16bit's unique tansaction id
 
 			hd := makeQueryHeader()
@@ -225,15 +228,15 @@ func (client *Dnsclient) DnsQuery(domain string, dnsserver []string) ([]DNSRespo
 
 			//send dns query msg
 			msgall := append(append(bTransID, bHeader...), bquerymsg...)
-			wn, err := udpcon.Write(msgall)
+			_, err = udpcon.Write(msgall)
 			if err != nil {
 				fnerr = err
 				return
 			}
-			log.Printf("write bytes:%d\n", wn)
+			//log.Printf("write bytes:%d\n", wn)
 
 			//read response
-			dnsresp := new(DNSResponse)
+			dnsresp.FromServer = srvaddr
 			rc := make([]byte, 512) //usually DNS response length < 512 byte
 			var rn int
 			for {
@@ -246,28 +249,41 @@ func (client *Dnsclient) DnsQuery(domain string, dnsserver []string) ([]DNSRespo
 						goto STARTQUERY
 					} else {
 						//over the max retry times
-						fnerr = err
-						return
+						log.Printf("retry over the max retry times.")
+						goto RTERR
 					}
 				}
 
 				//transaction ID is consistent
 				if rn > DNS_HEADER_LENGTH && bytes.Equal(bTransID, rc[0:2]) {
-					log.Printf("recv: %X\n", rc)
-					if dnsresp, err = ParseResp(rc[2:]); err != nil {
+					//log.Printf("recv: %X\n", rc)
+					if err = ParseResp(rc[2:], dnsresp); err != nil {
 						continue
 					}
 					break
 				}
 			}
-			log.Printf("dnsresponse: %+v\n", dnsresp)
-			log.Printf("length: %d,\nresponse: %s\n", rn, rc)
+			//log.Printf("dnsresponse: %+v\n", dnsresp)
+			queue <- dnsresp
+			return
 
-		}(server)
+		RTERR:
+			fnerr = err
+			wg.Done()
+			return
+		}(server, k)
 	}
 
+	//collect the response
+	go func() {
+		for resp := range queue {
+			//log.Printf("resp:%+v\n", resp)
+			result = append(result, *resp)
+			wg.Done()
+		}
+	}()
+
 	wg.Wait()
-	log.Println(fnerr)
 	return result, nil
 }
 
@@ -318,7 +334,8 @@ func makeQueryMsg(domainname string) ([]byte, error) {
 func getFields(src string) ([]string, error) {
 	//use ascii only, as Punycode not so universal
 	for _, ch := range src {
-		if (ch < '0' && ch != '.') || (ch > '9' && ch < 'A') || (ch > 'Z' && ch < 'a') || (ch > 'z') {
+		if (ch < '0' && ch != '.' && ch != '-') || (ch > '9' && ch < 'A') ||
+			(ch > 'Z' && ch < 'a') || (ch > 'z') {
 			return []string{}, DomainInvalidErr
 		}
 	}
@@ -402,44 +419,59 @@ func readsystemcfg() *dnsConfig {
 	return conf
 }
 
-func ParseResp(src []byte) (*DNSResponse, error) {
+func ParseResp(src []byte, dnsresp *DNSResponse) error {
 	var err error
-	dnsresponse := new(DNSResponse)
+
 	//verify QR(1->response) and OpCode(0000->normal query)
 	//that is , whether src[0] is euqal to 10000xxx
 	if (src[0] >> 3) != 0x10 {
 		err = errors.New("QR or OpCode not correct.(should be 10000)")
-		return dnsresponse, err
+		return err
 	}
 
 	//verify Reply Code(0000->no error)
 	//that is , whether src[1] is equal to xxxx0000
 	if (src[1] << 4) != 0x0 {
 		err = errors.New("reply code not correct.(should be 0000)")
-		return dnsresponse, err
+		return err
 	}
 
+	//number of RR
 	RRnum := uint16(src[4])*256 + uint16(src[5])
 	if RRnum < 1 {
 		err = errors.New("RR number is 0")
-		return dnsresponse, err
+		return err
 	}
 
+	//get query name in response
+	nameb := make([]byte, 0)
+	for nameindex := 10; nameindex < len(src) && src[nameindex] != 0x0; {
+		unitlen := src[nameindex]
+		nameb = append(nameb, src[nameindex+1:nameindex+int(unitlen)+1]...)
+		nameb = append(nameb, '.')
+		nameindex = nameindex + int(unitlen) + 1
+	}
+	domainname := string(bytes.TrimRight(nameb, "."))
+
 	//look for 0xc00c(which indicates the first index of the domain name if it is repeated)
+	//meaning of 0xc00c: 0xc00c = 11000000 00001100
+	// first 2 bit "11" means it's a pointer, and the rest "1100" specifies the index of first appearance of domain name.
+	// so if you count 12 bytes from tanscation id, you will see the domain name.
 	firsti := bytes.Index(src, []byte{0xc0, 0x0c})
 	if firsti == -1 {
 		err = errors.New("domain name not found in response")
-		return dnsresponse, err
+		return err
 	}
 
 	for l := 0; l < int(RRnum); l++ {
 		anstype := mapRRType[uint16(src[firsti+2])*256+uint16(src[firsti+3])]
 		ansclass := mapRRClass[uint16(src[firsti+4])*256+uint16(src[firsti+5])]
-		ansttl := uint32(src[firsti+6]<<24) + uint32(src[firsti+7]<<16) +
-			uint32(src[firsti+8]<<8) + uint32(src[firsti+9])
-		ansdatalen := uint16(src[firsti+10]>>8) + uint16(src[firsti+11])
+		ansttl := uint32(src[firsti+6])<<24 + uint32(src[firsti+7])<<16 +
+			uint32(src[firsti+8])<<8 + uint32(src[firsti+9])
+		ansdatalen := uint16(src[firsti+10])>>8 + uint16(src[firsti+11])
 		ansip := fmt.Sprint(net.IPv4(src[firsti+12], src[firsti+13], src[firsti+14], src[firsti+15]))
-		dnsresponse.Answer = append(dnsresponse.Answer, DNSAnswer{
+		dnsresp.Answer = append(dnsresp.Answer, DNSAnswer{
+			Name:    domainname,
 			RRType:  anstype,
 			Class:   ansclass,
 			TTL:     ansttl,
@@ -449,5 +481,5 @@ func ParseResp(src []byte) (*DNSResponse, error) {
 		firsti = firsti + 16
 	}
 
-	return dnsresponse, err
+	return err
 }
