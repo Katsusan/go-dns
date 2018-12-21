@@ -137,7 +137,7 @@ func (client *Dnsclient) DnsQuery(domain string, dnsserver []string) ([]DNSRespo
 				//transaction ID is consistent
 				if rn > DNS_HEADER_LENGTH && byte(TransID>>8) == rc[0] && byte(TransID) == rc[1] {
 					//log.Printf("recv: %X\n", rc)
-					if err = ParseResp(rc[2:], dnsresp); err != nil {
+					if err = ParseResp(rc[2:], dnsresp.Answer); err != nil {
 						continue
 					}
 					break
@@ -242,7 +242,8 @@ func readsystemcfg() *dnsConfig {
 	return conf
 }
 
-func ParseResp(src []byte, dnsresp *DNSResponse) error {
+//parse the dns response into dns answer including RR type,RR class, TTL, IP etc..
+func ParseResp(src []byte, answer []DNSAnswer) error {
 	var err error
 
 	//verify QR(1->response) and OpCode(0000->normal query)
@@ -293,7 +294,7 @@ func ParseResp(src []byte, dnsresp *DNSResponse) error {
 			uint32(src[firsti+8])<<8 + uint32(src[firsti+9])
 		ansdatalen := uint16(src[firsti+10])>>8 + uint16(src[firsti+11])
 		ansip := fmt.Sprint(net.IPv4(src[firsti+12], src[firsti+13], src[firsti+14], src[firsti+15]))
-		dnsresp.Answer = append(dnsresp.Answer, DNSAnswer{
+		answer = append(answer, DNSAnswer{
 			Name:    domainname,
 			RRType:  anstype,
 			Class:   ansclass,
