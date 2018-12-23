@@ -1,6 +1,7 @@
 package dnsoverhttps_test
 
 import (
+	"log"
 	"net/http"
 	"testing"
 
@@ -14,20 +15,22 @@ func TestQueryWithGet(t *testing.T) {
 	clnt := &dnsoverhttps.DoHclient{
 		Client: &http.Client{},
 	}
-	err := clnt.QueryWithGet(domain)
+	ans, err := clnt.QueryWithGet(domain)
 	if err != nil {
 		t.Error("QueryWithGet failed,", err)
 	}
+	log.Printf("%+v\n", ans)
 }
 
 func TestQueryWithPost(t *testing.T) {
-	domain := "google.com"
+	domain := "baidu.com"
 	clnt := &dnsoverhttps.DoHclient{
 		Client: &http.Client{},
 	}
 
-	err := clnt.QueryWithPost(domain)
+	ans, err := clnt.QueryWithPost(domain)
 	if err != nil {
 		t.Error("QueryWithPost failed.", err)
 	}
+	log.Printf("%+v\n", ans)
 }
