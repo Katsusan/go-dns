@@ -17,6 +17,15 @@ const (
 	CONTENT_TYPE         = "application/dns-message"
 )
 
+var (
+	errMap = map[int]error{
+		400: errors.New("DNS query not specified or too small"),
+		413: errors.New("DNS query is larger than maximum allowed DNS message size"),
+		415: errors.New("Unsupported content type"),
+		504: errors.New("Resolver timeout while waiting for the query response"),
+	}
+)
+
 type DoHclient struct {
 	Client *http.Client
 }
@@ -46,6 +55,14 @@ func (dohclnt *DoHclient) QueryWithPost(domain string) ([]dnsclient.DNSAnswer, e
 		return ans, err
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		if err, found := errMap[resp.StatusCode]; found == true {
+			return ans, err
+		} else {
+			return ans, errors.New("Can't get correct response, status=" + resp.Status + "(Unknown code)")
+		}
+	}
 
 	res, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
@@ -97,6 +114,14 @@ func (dohclnt *DoHclient) QueryWithGet(domain string) ([]dnsclient.DNSAnswer, er
 		return ans, err
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		if err, found := errMap[resp.StatusCode]; found == true {
+			return ans, err
+		} else {
+			return ans, errors.New("Can't get correct response, status=" + resp.Status + "(Unknown code)")
+		}
+	}
 
 	res, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
