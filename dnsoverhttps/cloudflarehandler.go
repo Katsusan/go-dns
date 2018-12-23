@@ -52,6 +52,18 @@ func (dohclnt *DoHclient) QueryWithPost(domain string) error {
 	}
 
 	log.Printf("res:%X\n", res)
+	//verify the transaction id
+	if bytes.Compare([]byte{byte(transid >> 8), byte(transid)}, res[:2]) != 0 {
+		err = errors.New("Transaction id not consistent.")
+		return err
+	}
+
+	ans := make([]dnsclient.DNSAnswer, 0)
+	err = dnsclient.ParseResp(res[2:], &ans)
+	if err != nil {
+		return err
+	}
+	log.Printf("answer:%+v\n", ans)
 
 	return err
 }
