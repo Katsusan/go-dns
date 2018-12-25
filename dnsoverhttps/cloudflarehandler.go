@@ -172,7 +172,7 @@ func (dohclnt *DoHclient) QueryWithJSON(domain string, flag int) ([]dnsclient.DN
 	ans := make([]dnsclient.DNSAnswer, 0)
 
 	//determine the query type(IPv4 or IPv6)
-	queryType, found := dnsclient.MapRRType[flag]
+	queryType, found := dnsclient.MapRRType[uint16(flag)]
 	if !found {
 		err = errors.New("Invalid query type, should be 1(A) or 28(AAAA)")
 		return ans, err
