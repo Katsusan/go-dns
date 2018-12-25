@@ -35,7 +35,7 @@ type JsonResp struct {
 	RA       bool `json:"RA"`
 	AD       bool `json:"AD"`
 	CD       bool `json:"CD"`
-	Question struct {
+	Question []struct {
 		Name string `json:"name"`
 		Type int    `json:"type"`
 	} `json:"Question"`
