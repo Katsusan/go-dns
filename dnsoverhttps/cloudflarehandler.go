@@ -219,12 +219,11 @@ func (dohclnt *DoHclient) QueryWithJSON(domain string, flag int) ([]dnsclient.DN
 
 	for i := 0; i < len(jr.Answer); i++ {
 		ans = append(ans, dnsclient.DNSAnswer{
-			Name:    jr.Answer[i].Name,
-			RRType:  dnsclient.MapRRType[uint16(jr.Answer[i].Type)],
-			Class:   "IN",
-			TTL:     uint32(jr.Answer[i].TTL),
-			DataLen: uint16(len(jr.Answer[i].IP)),
-			Ip:      jr.Answer[i].IP,
+			Name:   jr.Answer[i].Name,
+			RRType: dnsclient.MapRRType[uint16(jr.Answer[i].Type)],
+			Class:  "IN",
+			TTL:    uint32(jr.Answer[i].TTL),
+			Ip:     jr.Answer[i].IP,
 		})
 	}
 
