@@ -1,6 +1,7 @@
 package dnsoverhttps_test
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	"testing"
@@ -33,4 +34,17 @@ func TestQueryWithPost(t *testing.T) {
 		t.Error("QueryWithPost failed.", err)
 	}
 	log.Printf("%+v\n", ans)
+}
+
+func TestQueryWithJSON(t *testing.T) {
+	domain := "qq.com"
+	clnt := &dnsoverhttps.DoHclient{
+		Client: &http.Client{},
+	}
+
+	ans, err := clnt.QueryWithJSON(domain, 1)
+	if err != nil {
+		t.Errorf("TestQueryWithJSON failed.%s", err)
+	}
+	fmt.Printf("ans:%+v\n", ans)
 }

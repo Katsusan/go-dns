@@ -288,8 +288,8 @@ func ParseResp(src []byte, ans *[]DNSAnswer) error {
 	}
 
 	for l := 0; l < int(RRnum); l++ {
-		anstype := mapRRType[uint16(src[firsti+2])*256+uint16(src[firsti+3])]
-		ansclass := mapRRClass[uint16(src[firsti+4])*256+uint16(src[firsti+5])]
+		anstype := MapRRType[uint16(src[firsti+2])*256+uint16(src[firsti+3])]
+		ansclass := MapRRClass[uint16(src[firsti+4])*256+uint16(src[firsti+5])]
 		ansttl := uint32(src[firsti+6])<<24 + uint32(src[firsti+7])<<16 +
 			uint32(src[firsti+8])<<8 + uint32(src[firsti+9])
 		ansdatalen := uint16(src[firsti+10])>>8 + uint16(src[firsti+11])

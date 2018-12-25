@@ -58,7 +58,7 @@ var (
 	QUERY_TYPE_A   = []byte{0x0, 0x1} //query ipv4
 	QUERY_CLASS_IN = []byte{0x0, 0x1}
 
-	mapRRType = map[uint16]string{
+	MapRRType = map[uint16]string{
 		1:   "A",
 		2:   "NS",
 		5:   "CNAME",
@@ -74,8 +74,8 @@ var (
 		255: "ANY",
 	}
 
-	mapRRClass = map[uint16]string{
-		1: "IN",
+	MapRRClass = map[uint16]string{
+		1: "IN", //always 'IN'
 	}
 
 	syscfg *dnsConfig

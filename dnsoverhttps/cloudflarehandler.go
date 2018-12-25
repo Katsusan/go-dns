@@ -3,6 +3,7 @@ package dnsoverhttps
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"io/ioutil"
 	"log"
@@ -13,7 +14,8 @@ import (
 
 const (
 	CLOUDFLARE_QUERY_URL = "https://cloudflare-dns.com/dns-query"
-	HEADER_ACCEPT        = "application/dns-message"
+	ACCEPT_DNSMESSAGE    = "application/dns-message"
+	ACCEPT_DNSJSON       = "application/dns-json"
 	CONTENT_TYPE         = "application/dns-message"
 )
 
@@ -25,6 +27,25 @@ var (
 		504: errors.New("Resolver timeout while waiting for the query response"),
 	}
 )
+
+type JsonResp struct {
+	Status   int  `json:"Status"`
+	TC       bool `json:"TC"`
+	RD       bool `json:"RD"`
+	RA       bool `json:"RA"`
+	AD       bool `json:"AD"`
+	CD       bool `json:"CD"`
+	Question struct {
+		Name string `json:"name"`
+		Type int    `json:"type"`
+	} `json:"Question"`
+	Answer []struct {
+		Name string `json:"name"`
+		Type int    `json:"type"`
+		TTL  int    `json:"TTL"`
+		IP   string `json:"data"`
+	}
+}
 
 type DoHclient struct {
 	Client *http.Client
@@ -47,7 +68,7 @@ func (dohclnt *DoHclient) QueryWithPost(domain string) ([]dnsclient.DNSAnswer, e
 		return ans, err
 	}
 
-	req.Header.Add("accept", HEADER_ACCEPT)
+	req.Header.Add("accept", ACCEPT_DNSMESSAGE)
 	req.Header.Add("content-type", CONTENT_TYPE)
 
 	resp, err := dohclnt.Client.Do(req)
@@ -94,7 +115,7 @@ func (dohclnt *DoHclient) QueryWithGet(domain string) ([]dnsclient.DNSAnswer, er
 		return nil, err
 	}
 
-	req.Header.Add("accept", HEADER_ACCEPT)
+	req.Header.Add("accept", ACCEPT_DNSMESSAGE)
 
 	//make dns query message, including transaction id, flags, ..., see dnsmessage.go:DNSHeader
 	transid, _ := dnsclient.GenTransactionID()
@@ -141,6 +162,72 @@ func (dohclnt *DoHclient) QueryWithGet(domain string) ([]dnsclient.DNSAnswer, er
 		return ans, err
 	}
 	//log.Printf("answer:%+v\n", ans)
+	return ans, err
+
+}
+
+//
+func (dohclnt *DoHclient) QueryWithJSON(domain string, flag int) ([]dnsclient.DNSAnswer, error) {
+	var err error
+	ans := make([]dnsclient.DNSAnswer, 0)
+
+	//determine the query type(IPv4 or IPv6)
+	queryType, found := dnsclient.MapRRType[flag]
+	if !found {
+		err = errors.New("Invalid query type, should be 1(A) or 28(AAAA)")
+		return ans, err
+	}
+
+	//
+	req, err := http.NewRequest("GET", CLOUDFLARE_QUERY_URL, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("accept", ACCEPT_DNSJSON)
+	q := req.URL.Query()
+	q.Add("name", domain)
+	q.Add("type", queryType)
+	req.URL.RawQuery = q.Encode()
+
+	resp, err := dohclnt.Client.Do(req)
+	if err != nil {
+		return ans, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		if err, found := errMap[resp.StatusCode]; found == true {
+			return ans, err
+		} else {
+			return ans, errors.New("Can't get correct response, status=" + resp.Status + "(Unknown code)")
+		}
+	}
+
+	res, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return ans, err
+	}
+	log.Printf("jsonres:%s\n", res)
+
+	var jr JsonResp
+
+	err = json.Unmarshal(res, &jr)
+	if err != nil {
+		return ans, err
+	}
+
+	for i := 0; i < len(jr.Answer); i++ {
+		ans = append(ans, dnsclient.DNSAnswer{
+			Name:    jr.Answer[i].Name,
+			RRType:  dnsclient.MapRRType[jr.Answer[i].Type],
+			Class:   "IN",
+			TTL:     uint32(jr.Answer[i].TTL),
+			DataLen: uint16(len(jr.Answer[i].IP)),
+			Ip:      jr.Answer[i].IP,
+		})
+	}
+
 	return ans, err
 
 }
