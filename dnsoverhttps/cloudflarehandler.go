@@ -44,7 +44,7 @@ type JsonResp struct {
 		Type int    `json:"type"`
 		TTL  int    `json:"TTL"`
 		IP   string `json:"data"`
-	}
+	} `json:"Answer"`
 }
 
 type DoHclient struct {
