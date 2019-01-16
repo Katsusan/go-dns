@@ -102,7 +102,7 @@ func (dohclnt *DoHclient) QueryWithPost(domain string) ([]dnsclient.DNSAnswer, e
 	}
 	//log.Printf("answer:%+v\n", ans)
 
-	return ans, err
+	return ans, nil
 }
 
 //QueryWithGet: make DnsOverHttps query with HTTP Method 'GET'
@@ -162,11 +162,11 @@ func (dohclnt *DoHclient) QueryWithGet(domain string) ([]dnsclient.DNSAnswer, er
 		return ans, err
 	}
 	//log.Printf("answer:%+v\n", ans)
-	return ans, err
+	return ans, nil
 
 }
 
-//
+//make request to cloudflare server and pare the dns response of json format.
 func (dohclnt *DoHclient) QueryWithJSON(domain string, flag int) ([]dnsclient.DNSAnswer, error) {
 	var err error
 	ans := make([]dnsclient.DNSAnswer, 0)
@@ -227,6 +227,6 @@ func (dohclnt *DoHclient) QueryWithJSON(domain string, flag int) ([]dnsclient.DN
 		})
 	}
 
-	return ans, err
+	return ans, nil
 
 }
