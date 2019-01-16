@@ -5,9 +5,9 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"sync"
 	"sync/atomic"
 
+	"github.com/Katsusan/go-dns/dnsoverhttps"
 	lru "github.com/hashicorp/golang-lru"
 	"github.com/miekg/dns"
 )
@@ -21,30 +21,17 @@ const usage = `
 		-h,	--help	show help message
 		-v,	--version	show version and exit
 `
-const ARCCacheSize = 4096
+const (
+	ARCCacheSize = 1024
+	TwoQueueSize = 1024
 
-type Config struct {
-	ipv4Addr          string //format: host
-	ipv6Addr          string //format: host%zone
-	ipv4InterfaceName string //Interface name, eg: eth0
-	ipv6InterfaceName string
-	port              string
-	cache             string //optional cache algorithm, "ARC"/"2Q"
-}
+	TTLDay = 86400
+)
 
-type DNSServer struct {
-	config        *Config
-	args          []string
-	ipv4conn      *net.UDPConn
-	ipv6conn      *net.UDPConn
-	cache         *ServerCache
-	extendsrv     *http.Server
-	shutdownLock  sync.Mutex
-	listeningv4   int32 //1->listenning, 0->closed
-	listeningv6   int32 //1->listenning, 0->closed
-	listeninghttp int32 //1->listenning, 0->closed
-	running       int32
-}
+var (
+	userhosts Hosts
+	cache     *ServerCache
+)
 
 func NewServer(cfg *Config) (*DNSServer, error) {
 
@@ -74,13 +61,24 @@ func NewServer(cfg *Config) (*DNSServer, error) {
 		dnssrv.ipv6conn = ipv6Listen
 	}
 
+	//initializec dns cache, use "ARC" or "TwoQueue"
 	if cfg.cache == "ARC" {
 		var err error
-		dnssrv.cache.Arccache, err = lru.NewARC(ARCCacheSize)
+		cache.Arccache, err = lru.NewARC(ARCCacheSize)
+		cache.cachename = "ARC"
 		if err != nil {
-
+			return dnssrv, fmt.Errorf("Can't create dns arccache,%v", err)
+		}
+	} else if cfg.cache == "TwoQueue" {
+		var err error
+		cache.TwoQueuecache, err = lru.New2Q(TwoQueueSize)
+		cache.cachename = "TwoQueue"
+		if err != nil {
+			return dnssrv, fmt.Errorf("Can not create dns twoqueue cache, %v", err)
 		}
 	}
+
+	dnssrv.cfg = cfg
 
 	return dnssrv, nil
 }
@@ -130,15 +128,96 @@ func (s *DNSServer) handleQuery(qry []byte, addr net.Addr) error {
 		return fmt.Errorf("not dns query packet,QR=%t, OpCode=%d", querymsg.MsgHdr.Response, querymsg.MsgHdr.Opcode)
 	}
 
+	//if there is mutlti queries coming, suggest split up.
+	if querymsg.Truncated {
+		return fmt.Errorf("Not supported wireformat(flag Truncated=%t), split query into smaller ones", querymsg.Truncated)
+	}
+
+	//usualy only one Question
+	var answers []dns.RR
 	for _, ques := range querymsg.Question {
+		if rrtmp, err := s.Resolve(ques); err != nil {
+			answers = append(answers, rrtmp...)
+		}
+	}
+
+	//length=0 means hosts/cache(/DoH) lookup failed and need to forward the dns query
+	if len(answers) == 0 {
 
 	}
 
 	return nil
 }
 
-func Resolve(name string) {
+//Resolve preference:
+//	user-defined hosts > dns cache > instant query
+func (s *DNSServer) Resolve(question dns.Question) ([]dns.RR, error) {
+	resRR := make([]dns.RR, 0)
 
+	//only handles query with CLASS-IN
+	//TODO: CLASS-ANY...
+	if question.Qclass != dns.ClassINET {
+		return nil, fmt.Errorf("Unexpected query class, should be IN(0x0001), Got %d", question.Qclass)
+	}
+
+	//handles query type of A(ipv4), AAAA(ipv6), NS, CNAME, MX, TXT, ANY
+	switch question.Qtype {
+	case dns.TypeA:
+		//lookup in user-defined hosts
+		if hostsip, err := userhosts.Get(question.Name); err == nil && len(hostsip) != 0 {
+			for _, ip := range hostsip {
+				resRR = append(resRR, &dns.A{
+					Hdr: dns.RR_Header{
+						Name:   question.Name,
+						Rrtype: dns.TypeA,
+						Class:  dns.ClassINET,
+						Ttl:    TTLDay,
+					},
+					A: ip,
+				})
+			}
+			return resRR, nil
+		}
+
+		//lookup in server cache
+		//TODO: filter the expired dnsRR(by TTL)
+		if res, found := cache.Get(question.Name); found {
+			if dnsrr, ok := res.([]dns.RR); ok {
+				return dnsrr, nil
+			}
+		}
+
+		//neither hosts nor cache has the corespond dnsRR, then issue the instant query
+
+		//use dnsoverhttps or not
+		if s.cfg.DoH {
+			clnt := &dnsoverhttps.DoHclient{
+				Client: &http.Client{},
+			}
+			if ansarr, err := clnt.QueryWithJSON(question.Name, "A"); err == nil && len(ansarr) != 0 {
+				for _, ans := range ansarr {
+					resRR = append(resRR, &dns.A{
+						Hdr: dns.RR_Header{
+							Name:   question.Name,
+							Rrtype: dns.TypeA,
+							Class:  dns.ClassINET,
+							Ttl:    ans.TTL,
+						},
+						A: net.ParseIP(ans.Ip),
+					})
+				}
+				return resRR, nil
+			}
+		}
+
+		//return 0-len dnsRR so that handleQuery can sense that and
+		//forward the whole bytes to dns server.
+		return resRR, nil
+
+	case dns.TypeAAAA:
+
+	}
+	return resRR, nil
 }
 
 func (s *DNSServer) shutDown() {
