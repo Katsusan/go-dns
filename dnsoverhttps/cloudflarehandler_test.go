@@ -42,7 +42,7 @@ func TestQueryWithJSON(t *testing.T) {
 		Client: &http.Client{},
 	}
 
-	ans, err := clnt.QueryWithJSON(domain, 1)
+	ans, err := clnt.QueryWithJSON(domain, "A")
 	if err != nil {
 		t.Errorf("TestQueryWithJSON failed.%s", err)
 	}

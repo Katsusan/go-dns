@@ -167,16 +167,17 @@ func (dohclnt *DoHclient) QueryWithGet(domain string) ([]dnsclient.DNSAnswer, er
 }
 
 //make request to cloudflare server and pare the dns response of json format.
-func (dohclnt *DoHclient) QueryWithJSON(domain string, flag int) ([]dnsclient.DNSAnswer, error) {
+func (dohclnt *DoHclient) QueryWithJSON(domain string, qtype string) ([]dnsclient.DNSAnswer, error) {
 	var err error
 	ans := make([]dnsclient.DNSAnswer, 0)
 
 	//determine the query type(IPv4 or IPv6)
+	/* -> change parameter to query type string
 	queryType, found := dnsclient.MapRRType[uint16(flag)]
 	if !found {
 		err = errors.New("Invalid query type, should be 1(A) or 28(AAAA)")
 		return ans, err
-	}
+	}*/
 
 	//
 	req, err := http.NewRequest("GET", CLOUDFLARE_QUERY_URL, nil)
@@ -187,7 +188,7 @@ func (dohclnt *DoHclient) QueryWithJSON(domain string, flag int) ([]dnsclient.DN
 	req.Header.Add("accept", ACCEPT_DNSJSON)
 	q := req.URL.Query()
 	q.Add("name", domain)
-	q.Add("type", queryType)
+	q.Add("type", qtype)
 	req.URL.RawQuery = q.Encode()
 
 	resp, err := dohclnt.Client.Do(req)
