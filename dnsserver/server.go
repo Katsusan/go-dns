@@ -141,9 +141,11 @@ func (s *DNSServer) handleQuery(qry []byte, addr net.Addr) error {
 		}
 	}
 
-	//length=0 means hosts/cache(/DoH) lookup failed and need to forward the dns query
+	//length=0 means hosts/cache(or DoH) lookup failed and need to forward the dns query
 	if len(answers) == 0 {
-
+		if resp, err := s.forwardQuery(qry); err != nil {
+			return s.sendResp(resp, addr)
+		}
 	}
 
 	return nil
@@ -211,7 +213,7 @@ func (s *DNSServer) Resolve(question dns.Question) ([]dns.RR, error) {
 		}
 
 		//return 0-len dnsRR so that handleQuery can sense that and
-		//forward the whole bytes to dns server.
+		//forward the whole query bytes to dns server.
 		return resRR, nil
 
 	case dns.TypeAAAA:
@@ -220,6 +222,18 @@ func (s *DNSServer) Resolve(question dns.Question) ([]dns.RR, error) {
 	return resRR, nil
 }
 
+//forward query to config.serverlist and return the response
+func (s *DNSServer) forwardQuery(src []byte) ([]byte, error) {
+	var resp []byte
+
+	return resp, nil
+}
+
+//
+func (s *DNSServer) sendResp(resp []byte, dst net.Addr) error {
+
+	return nil
+}
 func (s *DNSServer) shutDown() {
 	if atomic.CompareAndSwapInt32(&s.running, 1, 0) {
 	}

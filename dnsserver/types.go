@@ -16,6 +16,7 @@ type Config struct {
 	port              string
 	cache             string //optional cache algorithm, "ARC"/"TwoQueue"
 	DoH               bool   //use DNSoverHTTPS
+	serverlist        []string
 }
 
 type DNSServer struct {
