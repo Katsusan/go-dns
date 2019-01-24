@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"sync/atomic"
+	"time"
 
 	"github.com/Katsusan/go-dns/dnsoverhttps"
 	lru "github.com/hashicorp/golang-lru"
@@ -38,17 +39,27 @@ func NewServer(cfg *Config) (*DNSServer, error) {
 	dnssrv := new(DNSServer)
 	//if cfg.ipv4InterfaceName is null string or non-exist name,
 	//then ipv4Interface will be nil and ListenMulticastUDP will use default interface.
-	ipv4Interface, _ := net.InterfaceByName(cfg.ipv4InterfaceName)
-	ipv6Interface, _ := net.InterfaceByName(cfg.ipv6InterfaceName)
+	//ipv4Interface, _ := net.InterfaceByName(cfg.ipv4InterfaceName)
+	//ipv6Interface, _ := net.InterfaceByName(cfg.ipv6InterfaceName)
 
-	ipv4Addr, _ := net.ResolveUDPAddr("udp4", cfg.ipv4Addr+":"+cfg.port)
-	ipv4Listen, ipv4err := net.ListenMulticastUDP("udp4", ipv4Interface, ipv4Addr)
+	//ipv4Addr, _ := net.ResolveUDPAddr("udp4", cfg.ipv4Addr+":"+cfg.port)
+	ipv4Addr := &net.UDPAddr{
+		IP:   net.ParseIP(cfg.ipv4Addr),
+		Port: cfg.port,
+	}
+	ipv4Listen, ipv4err := net.ListenUDP("udp4", ipv4Addr)
 
-	ipv6Addr, _ := net.ResolveUDPAddr("udp6", cfg.ipv6Addr+":"+cfg.port)
-	ipv6Listen, ipv6err := net.ListenMulticastUDP("udp6", ipv6Interface, ipv6Addr)
+	//ipv6Addr, _ := net.ResolveUDPAddr("udp6", cfg.ipv6Addr+":"+cfg.port)
+	ipv6Addr := &net.UDPAddr{
+		IP:   net.ParseIP(cfg.ipv6Addr),
+		Port: cfg.port,
+	}
+	ipv6Listen, ipv6err := net.ListenUDP("udp6", ipv6Addr)
 
 	if ipv4err != nil && ipv6err != nil {
-		return dnssrv, fmt.Errorf("No listeners could be established.")
+		log.Println("ipv4err:", ipv4err)
+		log.Println("ipv6err:", ipv6err)
+		return dnssrv, fmt.Errorf("No listeners could be established")
 	}
 
 	if ipv4Listen != nil {
@@ -62,6 +73,7 @@ func NewServer(cfg *Config) (*DNSServer, error) {
 	}
 
 	//initializec dns cache, use "ARC" or "TwoQueue"
+	cache = new(ServerCache)
 	if cfg.cache == "ARC" {
 		var err error
 		cache.Arccache, err = lru.NewARC(ARCCacheSize)
@@ -91,28 +103,33 @@ func (s *DNSServer) Run() {
 }
 
 func (s *DNSServer) start() {
-	if atomic.CompareAndSwapInt32(&s.listeningv4, 0, 1) {
+	if atomic.LoadInt32(&s.listeningv4) == 1 {
 		go s.recvmsg(s.ipv4conn)
 	}
 
-	if atomic.CompareAndSwapInt32(&s.listeningv6, 0, 1) {
+	if atomic.LoadInt32(&s.listeningv6) == 1 {
 		go s.recvmsg(s.ipv6conn)
 	}
 }
 
 func (s *DNSServer) recvmsg(con *net.UDPConn) {
 
+	buf := make([]byte, 65535) //max length of UDP packet
 	for atomic.LoadInt32(&s.running) == 1 {
-		buf := make([]byte, 65535) //max length of UDP packet
+
 		n, fromAddr, err := con.ReadFrom(buf)
 		if err != nil {
 			continue
 		}
+		log.Println("recv ", n, "bytes udp packet:\n", buf[:n])
 
-		if err := s.handleQuery(buf[:n], fromAddr); err != nil {
-			log.Printf("handling packets failed.error=%s\n", err)
-		}
+		go s.handleQuery(buf[:n], fromAddr)
+		/*
+			if err := s.handleQuery(buf[:n], fromAddr); err != nil {
+				log.Printf("handling packets failed.error=%s\n", err)
+			}*/
 	}
+	return
 }
 
 func (s *DNSServer) handleQuery(qry []byte, addr net.Addr) error {
@@ -125,7 +142,7 @@ func (s *DNSServer) handleQuery(qry []byte, addr net.Addr) error {
 
 	//judge the QR flag of DNS packet(0->query, 1->response)
 	if querymsg.MsgHdr.Response || querymsg.MsgHdr.Opcode != dns.OpcodeQuery {
-		return fmt.Errorf("not dns query packet,QR=%t, OpCode=%d", querymsg.MsgHdr.Response, querymsg.MsgHdr.Opcode)
+		return fmt.Errorf("Not dns query packet,QR=%t, OpCode=%d", querymsg.MsgHdr.Response, querymsg.MsgHdr.Opcode)
 	}
 
 	//if there is mutlti queries coming, suggest split up.
@@ -143,12 +160,53 @@ func (s *DNSServer) handleQuery(qry []byte, addr net.Addr) error {
 
 	//length=0 means hosts/cache(or DoH) lookup failed and need to forward the dns query
 	if len(answers) == 0 {
-		if resp, err := s.forwardQuery(qry); err != nil {
-			return s.sendResp(resp, addr)
+		resp, err := s.forwardQuery(qry)
+		if err != nil {
+			log.Println("Failed to forward the wuery")
+			return err
 		}
+		return s.sendResp(resp, addr)
 	}
 
-	return nil
+	//otherwise means hosts/cache/DoH succeed
+	respmsg := &dns.Msg{
+		MsgHdr: dns.MsgHdr{
+			//transcation ID needs to be consistent
+			Id: querymsg.Id,
+
+			//set Query/Response flag to Response(1).
+			//	false(0) measn query.
+			Response: true,
+
+			//set OpCode to be 0 (Normal Query)
+			//	4 means DNS NOTIFY(RFC1996)
+			//	5 measn DNS UPDATE(RFC2136)
+			Opcode: dns.OpcodeQuery,
+
+			//Authoritative Answer. always 1.
+			Authoritative: true,
+
+			//the following flag in response usually set to 0.
+			//TC, RD, RA, Z, AD, CD
+
+			//Response Code.
+			//	0	->	NoError
+			//	1	->	FormErr
+			//	2	->	ServFail
+			//	3	->	NXDomain
+			//	4	->	Notlmp
+			//	5	->	Refused
+			Rcode: dns.RcodeSuccess,
+		},
+		Compress: true,
+		Answer:   answers,
+	}
+
+	if msgb, err := respmsg.Pack(); err != nil {
+		return err
+	} else {
+		return s.sendResp(msgb, addr)
+	}
 }
 
 //Resolve preference:
@@ -224,17 +282,95 @@ func (s *DNSServer) Resolve(question dns.Question) ([]dns.RR, error) {
 
 //forward query to config.serverlist and return the response
 func (s *DNSServer) forwardQuery(src []byte) ([]byte, error) {
-	var resp []byte
+	resp := make([]byte, 65535)
+	var resplen int
 
-	return resp, nil
+	resch := make(chan []byte, len(s.cfg.serverlist))
+	defer close(resch)
+
+	for _, srv := range s.cfg.serverlist {
+		go func(s string) {
+			udpaddr, _ := net.ResolveUDPAddr("udp", s)
+			udpconn, err := net.DialUDP("udp", nil, udpaddr)
+			if err != nil {
+				log.Printf("Server:%s DialUDP failed,error=%v\n", s, err)
+				return
+			}
+			defer udpconn.Close()
+
+			udpconn.SetDeadline(time.Now().Add(5 * time.Second))
+
+			_, err = udpconn.Write(src)
+			if err != nil {
+				log.Printf("Failed to write to server:%s, error=%v\n", s, err)
+				return
+			}
+
+			buf := make([]byte, 65535)
+			n, err := udpconn.Read(buf)
+			if err != nil {
+				log.Printf("Failed to read from udp connection, error=%v\n", err)
+				return
+			}
+			log.Println("receive", n, "bytes data from DNS", buf[:n])
+			resch <- buf[:n]
+		}(srv)
+	}
+
+	select {
+	case v := <-resch:
+		resplen = copy(resp, v)
+		log.Println("copy", resplen, "bytes")
+	case <-time.After(5 * time.Second):
+		log.Printf("Timeout for waiting for server's response")
+	}
+
+	log.Println("overall DNS response:", resp[:resplen])
+	return resp[:resplen], nil
 }
 
-//
+//sendResp will
 func (s *DNSServer) sendResp(resp []byte, dst net.Addr) error {
+
+	log.Println("will send to client:", resp)
+
+	clientAddr := dst.(*net.UDPAddr)
+
+	if clientAddr.IP.To4() != nil {
+		_, err := s.ipv4conn.WriteToUDP(resp, clientAddr)
+		if err != nil {
+			return err
+		}
+	} else {
+		_, err := s.ipv6conn.WriteToUDP(resp, clientAddr)
+		if err != nil {
+			return err
+		}
+	}
 
 	return nil
 }
-func (s *DNSServer) shutDown() {
+func (s *DNSServer) ShutDown() error {
 	if atomic.CompareAndSwapInt32(&s.running, 1, 0) {
+		//close all listeners, including ipv4/ipv6/http
+		if s.ipv4conn != nil {
+			if err := s.ipv4conn.Close(); err != nil {
+				log.Printf("failed to close ipv4 listener, error=%v\n", err)
+			}
+		}
+
+		if s.ipv6conn != nil {
+			if err := s.ipv6conn.Close(); err != nil {
+				log.Printf("failed to close ipv6 listener, error=%v\n", err)
+			}
+		}
+
+		if s.extendsrv != nil {
+			if err := s.extendsrv.Close(); err != nil {
+				log.Printf("failed to close http server, error=%v\n", err)
+			}
+		}
 	}
+
+	return nil
 }

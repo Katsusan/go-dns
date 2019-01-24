@@ -13,7 +13,7 @@ type Config struct {
 	ipv6Addr          string //ipv6 listening address, format: host%zone
 	ipv4InterfaceName string //Interface name, eg: eth0
 	ipv6InterfaceName string //same to above
-	port              string
+	port              int
 	cache             string //optional cache algorithm, "ARC"/"TwoQueue"
 	DoH               bool   //use DNSoverHTTPS
 	serverlist        []string
