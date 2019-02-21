@@ -9,7 +9,7 @@ func Test_StartStop(t *testing.T) {
 	srv, err := NewServer(&Config{
 		ipv4Addr:   "192.168.1.33",
 		port:       53,
-		DoH:        false,
+		DoH:        true,
 		serverlist: []string{"1.1.1.1:53"},
 		cache:      "ARC",
 	})

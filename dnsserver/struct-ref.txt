@@ -1,0 +1,113 @@
+type Msg struct {
+    MsgHdr
+    Compress    bool    `json:"-"`
+    Question    []Question
+    Answer        []RR
+    Ns        []RR
+    Extra        []RR
+}
+
+type MsgHdr struct {
+    Id            uint16
+    Response        bool
+    Opcode            int
+    Authoritative        bool
+    Truncated        bool
+    RecursionDesired    bool
+    RecursionAvailable    bool
+    Zero            bool
+    AuthenticatedData    bool
+    CheckingDisabled    bool
+    Rcode            int
+}
+
+type RR interface {
+    Header() *RR_Header
+    String() string
+    copy() RR
+    len(off int, compression map[string]struct{}) int
+    pack(msg []byte, off int, compression compressionMap, compress bool) (off1 int, err error)
+    unpack(msg []byte, off int) (off1 int, err error)
+}
+
+type Question struct {
+    Name    string    `dns:"cdomain-name"`
+    Qtype    uint16
+    Qclass    uint16
+}
+
+-----------------------------------------------------------------------
+
+go recv()
+
+|
+
+[]byte ...
+
+|
+
+go handle()
+
+|
+
+Resolve()   ->  Host/Cache/DoH
+Forward()
+
+-----------------------------------------------------------------------
+
+DNS record:
+    cloudflare.com.            285    IN    A    198.41.212.157
+    cloudflare.com.            285    IN    A    198.41.213.157
+
+-----------------------------------------------------------------------
+
+配置文件config
+
+|
+
+cfg
+
+|
+
+NewServer()
+
+-----------------------------------------------------------------------
+toml example:
+
++++
+
+type = "gDNS config"
+
+[server]
+    ipv4addr = []   #optional,default 
+    ipv6addr = []   #optional
+    ipv4interface = []  #optional
+    ipv6interface = []  #optional
+    port = 53
+    cache = "ARC"   #cache algorithm, one of "ARC"/"TwoQueue"
+    DoH = false     #use dnsoverhttps
+    serverlist = [] #specify servers which will be forwarded to, eg: "1.1.1.1:53"
+
+[hosts]
+
+
+[log]
+    loglevel = 3
+    logfile = "/usr/local/gDNS/gDNS.log"
+    log
++++
+
+-----------------------------------------------------------------------
+yaml example:
+
+---
+
+type: gDNS config
+
+ipv4addr:
+ - 
+ -
+
+
+
+

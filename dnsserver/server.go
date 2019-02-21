@@ -5,6 +5,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -75,18 +76,24 @@ func NewServer(cfg *Config) (*DNSServer, error) {
 	//initializec dns cache, use "ARC" or "TwoQueue"
 	cache = new(ServerCache)
 	if cfg.cache == "ARC" {
-		var err error
+		/*var err error
 		cache.Arccache, err = lru.NewARC(ARCCacheSize)
 		cache.cachename = "ARC"
 		if err != nil {
 			return dnssrv, fmt.Errorf("Can't create dns arccache,%v", err)
+		}*/
+		var err error
+		dnssrv.cache, err = lru.NewARC(ARCCacheSize)
+		if err != nil {
+			return dnssrv, fmt.Errorf("can not create ARCCache -%s", err)
 		}
 	} else if cfg.cache == "TwoQueue" {
 		var err error
-		cache.TwoQueuecache, err = lru.New2Q(TwoQueueSize)
-		cache.cachename = "TwoQueue"
+		/*cache.TwoQueuecache, err = lru.New2Q(TwoQueueSize)
+		cache.cachename = "TwoQueue"*/
+		dnssrv.cache, err = lru.New2Q(TwoQueueSize)
 		if err != nil {
-			return dnssrv, fmt.Errorf("Can not create dns twoqueue cache, %v", err)
+			return dnssrv, fmt.Errorf("can not create dns twoqueue cache, %v", err)
 		}
 	}
 
@@ -150,22 +157,40 @@ func (s *DNSServer) handleQuery(qry []byte, addr net.Addr) error {
 		return fmt.Errorf("Not supported wireformat(flag Truncated=%t), split query into smaller ones", querymsg.Truncated)
 	}
 
-	//usualy only one Question
+	//usualy only one Question, although there is "usually 1" in RFC1035 4.1.2,
+	//how to define RCode with multiple questions is up in the air.
 	var answers []dns.RR
+
+	if len(answers) > 1 {
+		return fmt.Errorf("over one question in query")
+	}
 	for _, ques := range querymsg.Question {
-		if rrtmp, err := s.Resolve(ques); err != nil {
+		if rrtmp, err := s.Resolve(ques); err == nil {
 			answers = append(answers, rrtmp...)
 		}
 	}
+	log.Println("after resolve, answers is", answers)
 
 	//length=0 means hosts/cache(or DoH) lookup failed and need to forward the dns query
 	if len(answers) == 0 {
-		resp, err := s.forwardQuery(qry)
+		fwdresp, err := s.forwardQuery(qry)
 		if err != nil {
-			log.Println("Failed to forward the wuery")
+			log.Println("Failed to forward the query")
 			return err
 		}
-		return s.sendResp(resp, addr)
+
+		//convert forward response into dns.Msg and add dns.Msg.Answer(dns.RR) into cache
+		fwdmsg := new(dns.Msg)
+		if err := fwdmsg.Unpack(fwdresp); err != nil {
+			return fmt.Errorf("failed to unpack the forward response,%v", err)
+		}
+
+		/*
+			if len(fwdmsg.Answer) > 0 && len(fwdmsg.Question) > 0 {
+				s.cache.Add(fwdmsg.Question[0].Name, fwdmsg.Answer[0])
+			}*/
+
+		return s.sendResp(fwdresp, addr)
 	}
 
 	//otherwise means hosts/cache/DoH succeed
@@ -210,47 +235,41 @@ func (s *DNSServer) handleQuery(qry []byte, addr net.Addr) error {
 }
 
 //Resolve preference:
-//	user-defined hosts > dns cache > instant query
+//	user-defined hosts > dns cache > DoH
 func (s *DNSServer) Resolve(question dns.Question) ([]dns.RR, error) {
 	resRR := make([]dns.RR, 0)
 
 	//only handles query with CLASS-IN
 	//TODO: CLASS-ANY...
 	if question.Qclass != dns.ClassINET {
-		return nil, fmt.Errorf("Unexpected query class, should be IN(0x0001), Got %d", question.Qclass)
+		return nil, fmt.Errorf("unexpected query class, should be IN(0x0001), Got %d", question.Qclass)
+	}
+
+	//lookup in user-defined hosts
+	if hostsRR, err := userhosts.Get(question.Name); err == nil && len(hostsRR) != 0 {
+		return hostsRR, nil
 	}
 
 	//handles query type of A(ipv4), AAAA(ipv6), NS, CNAME, MX, TXT, ANY
 	switch question.Qtype {
 	case dns.TypeA:
-		//lookup in user-defined hosts
-		if hostsip, err := userhosts.Get(question.Name); err == nil && len(hostsip) != 0 {
-			for _, ip := range hostsip {
-				resRR = append(resRR, &dns.A{
-					Hdr: dns.RR_Header{
-						Name:   question.Name,
-						Rrtype: dns.TypeA,
-						Class:  dns.ClassINET,
-						Ttl:    TTLDay,
-					},
-					A: ip,
-				})
-			}
-			return resRR, nil
-		}
-
 		//lookup in server cache
 		//TODO: filter the expired dnsRR(by TTL)
-		if res, found := cache.Get(question.Name); found {
+		if res, found := s.cache.Get(strings.Trim(question.Name, ".")); found {
+			log.Println("all keys in cache", s.cache.Keys())
+			log.Println("now query", question.Name, "in cache")
+			log.Printf("type of res is %T\n", res)
+
 			if dnsrr, ok := res.([]dns.RR); ok {
+				log.Println("found in dns cache:", dnsrr)
 				return dnsrr, nil
 			}
 		}
 
-		//neither hosts nor cache has the corespond dnsRR, then issue the instant query
-
-		//use dnsoverhttps or not
+		//neither hosts nor cache has the corespond dns.RR, then according to the DoH option
+		//to decide using dnsoverhttps or not
 		if s.cfg.DoH {
+			log.Println("will query by DoH")
 			clnt := &dnsoverhttps.DoHclient{
 				Client: &http.Client{},
 			}
@@ -266,6 +285,8 @@ func (s *DNSServer) Resolve(question dns.Question) ([]dns.RR, error) {
 						A: net.ParseIP(ans.Ip),
 					})
 				}
+				//Add to cache for later query
+				s.cache.Add(strings.Trim(question.Name, "."), resRR)
 				return resRR, nil
 			}
 		}
@@ -326,6 +347,17 @@ func (s *DNSServer) forwardQuery(src []byte) ([]byte, error) {
 	}
 
 	log.Println("overall DNS response:", resp[:resplen])
+	//convert response to dns.RR and add it to cache
+	dnsmsg := new(dns.Msg)
+	if err := dnsmsg.Unpack(resp[:resplen]); err != nil {
+		log.Println("unpack failed, invalid format or messages")
+	}
+	//usually only one question
+	for _, quesname := range dnsmsg.Question {
+		s.cache.Add(strings.Trim(quesname.Name, "."), dnsmsg.Answer)
+		log.Println("add", strings.Trim(quesname.Name, "."), "to cache")
+	}
+
 	return resp[:resplen], nil
 }
 

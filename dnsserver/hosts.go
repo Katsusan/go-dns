@@ -2,13 +2,14 @@ package dnsserver
 
 import (
 	"errors"
-	"net"
 	"sync/atomic"
+
+	"github.com/miekg/dns"
 )
 
-func (h *Hosts) Get(name string) ([]net.IP, error) {
+func (h *Hosts) Get(name string) ([]dns.RR, error) {
 	if atomic.LoadUint32(&h.state) != 1 {
-		return []net.IP{}, errors.New("state of Hosts is unready(uninit or reloading)")
+		return []dns.RR{}, errors.New("state of Hosts is unready(not init or reloading)")
 	}
 
 	return h.ip[name], nil

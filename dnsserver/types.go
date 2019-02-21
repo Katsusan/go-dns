@@ -30,13 +30,15 @@ type DNSServer struct {
 	listeningv6   int32 //1->listenning, 0->closed
 	listeninghttp int32 //1->listenning, 0->closed
 	running       int32
+	cache         DNSCache
 }
 
 type Hosts struct {
-	ip    map[string][]net.IP
+	ip    map[string][]dns.RR
 	state uint32 //unready=0/on service=1
 }
 
-type DnsEntry struct {
-	rr []dns.RR
+type test struct {
+	rr   []dns.RR
+	ques dns.Question
 }
