@@ -94,7 +94,7 @@ type = "gDNS config"
 [log]
     loglevel = 3
     logfile = "/usr/local/gDNS/gDNS.log"
-    log
+
 +++
 
 -----------------------------------------------------------------------
@@ -104,9 +104,25 @@ yaml example:
 
 type: gDNS config
 
-ipv4addr:
- - 
- -
+server:
+    ipv4addr: #optional, same as above
+     - 
+     -
+    ipv6addr:
+     -
+     -
+    port: 53
+    cache: "ARC"
+    DoH: false
+    serverlist:
+     - 1.1.1.1:53
+     - 8.8.8.8:53
+    
+log:
+    loglevel: 3
+    logfile: /usr/local/gDNS/gDNS.log
+
+---
 
 
 

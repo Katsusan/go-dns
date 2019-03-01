@@ -8,7 +8,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-type Config struct {
+type Option struct {
 	ipv4Addr          string //ipv4 listening address, format: host
 	ipv6Addr          string //ipv6 listening address, format: host%zone
 	ipv4InterfaceName string //Interface name, eg: eth0
@@ -20,7 +20,7 @@ type Config struct {
 }
 
 type DNSServer struct {
-	cfg           *Config
+	opts          *Option
 	args          []string
 	ipv4conn      *net.UDPConn
 	ipv6conn      *net.UDPConn
@@ -36,9 +36,4 @@ type DNSServer struct {
 type Hosts struct {
 	ip    map[string][]dns.RR
 	state uint32 //unready=0/on service=1
-}
-
-type test struct {
-	rr   []dns.RR
-	ques dns.Question
 }

@@ -1,6 +1,7 @@
 package dnsserver
 
 import (
+	"flag"
 	"fmt"
 	"log"
 	"net"
@@ -9,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	Tiny "github.com/Katsusan/go-dns/config"
 	"github.com/Katsusan/go-dns/dnsoverhttps"
 	lru "github.com/hashicorp/golang-lru"
 	"github.com/miekg/dns"
@@ -32,28 +34,59 @@ const (
 
 var (
 	userhosts Hosts
+	cfgfile   string
 	cache     *ServerCache
 )
 
-func NewServer(cfg *Config) (*DNSServer, error) {
+func init() {
+	flag.StringVar(&cfgfile, "c", "gDNS.toml", "path of config file")
+}
+
+func mapToOption(cfg map[string]interface{}) (*Option, error) {
+	opts := new(Option)
+	log.Println("config map:", cfg)
+
+	return opts, nil
+
+}
+
+func New() (*DNSServer, error) {
+	tiny := Tiny.NewConfig(cfgfile)
+	if tiny.ConfigErr != nil {
+		return nil, fmt.Errorf("NewConfig failed, err:%v", tiny.ConfigErr)
+	}
+
+	var (
+		opts *Option
+		err  error
+	)
+	if opts, err = mapToOption(tiny.ParseResult); err != nil {
+		return nil, fmt.Errorf("mapToOption failed, err:%v", err)
+	}
+
+	return NewServer(opts)
+}
+
+//NewServer will read the config and generate a DNSServer
+func NewServer(opts *Option) (*DNSServer, error) {
 
 	dnssrv := new(DNSServer)
-	//if cfg.ipv4InterfaceName is null string or non-exist name,
+	//if opts.ipv4InterfaceName is null string or non-exist name,
 	//then ipv4Interface will be nil and ListenMulticastUDP will use default interface.
-	//ipv4Interface, _ := net.InterfaceByName(cfg.ipv4InterfaceName)
-	//ipv6Interface, _ := net.InterfaceByName(cfg.ipv6InterfaceName)
+	//ipv4Interface, _ := net.InterfaceByName(opts.ipv4InterfaceName)
+	//ipv6Interface, _ := net.InterfaceByName(opts.ipv6InterfaceName)
 
-	//ipv4Addr, _ := net.ResolveUDPAddr("udp4", cfg.ipv4Addr+":"+cfg.port)
+	//ipv4Addr, _ := net.ResolveUDPAddr("udp4", opts.ipv4Addr+":"+opts.port)
 	ipv4Addr := &net.UDPAddr{
-		IP:   net.ParseIP(cfg.ipv4Addr),
-		Port: cfg.port,
+		IP:   net.ParseIP(opts.ipv4Addr),
+		Port: opts.port,
 	}
 	ipv4Listen, ipv4err := net.ListenUDP("udp4", ipv4Addr)
 
 	//ipv6Addr, _ := net.ResolveUDPAddr("udp6", cfg.ipv6Addr+":"+cfg.port)
 	ipv6Addr := &net.UDPAddr{
-		IP:   net.ParseIP(cfg.ipv6Addr),
-		Port: cfg.port,
+		IP:   net.ParseIP(opts.ipv6Addr),
+		Port: opts.port,
 	}
 	ipv6Listen, ipv6err := net.ListenUDP("udp6", ipv6Addr)
 
@@ -75,7 +108,7 @@ func NewServer(cfg *Config) (*DNSServer, error) {
 
 	//initializec dns cache, use "ARC" or "TwoQueue"
 	cache = new(ServerCache)
-	if cfg.cache == "ARC" {
+	if opts.cache == "ARC" {
 		/*var err error
 		cache.Arccache, err = lru.NewARC(ARCCacheSize)
 		cache.cachename = "ARC"
@@ -87,7 +120,7 @@ func NewServer(cfg *Config) (*DNSServer, error) {
 		if err != nil {
 			return dnssrv, fmt.Errorf("can not create ARCCache -%s", err)
 		}
-	} else if cfg.cache == "TwoQueue" {
+	} else if opts.cache == "TwoQueue" {
 		var err error
 		/*cache.TwoQueuecache, err = lru.New2Q(TwoQueueSize)
 		cache.cachename = "TwoQueue"*/
@@ -97,7 +130,7 @@ func NewServer(cfg *Config) (*DNSServer, error) {
 		}
 	}
 
-	dnssrv.cfg = cfg
+	dnssrv.opts = opts
 
 	return dnssrv, nil
 }
@@ -268,7 +301,7 @@ func (s *DNSServer) Resolve(question dns.Question) ([]dns.RR, error) {
 
 		//neither hosts nor cache has the corespond dns.RR, then according to the DoH option
 		//to decide using dnsoverhttps or not
-		if s.cfg.DoH {
+		if s.opts.DoH {
 			log.Println("will query by DoH")
 			clnt := &dnsoverhttps.DoHclient{
 				Client: &http.Client{},
@@ -306,10 +339,10 @@ func (s *DNSServer) forwardQuery(src []byte) ([]byte, error) {
 	resp := make([]byte, 65535)
 	var resplen int
 
-	resch := make(chan []byte, len(s.cfg.serverlist))
+	resch := make(chan []byte, len(s.opts.serverlist))
 	defer close(resch)
 
-	for _, srv := range s.cfg.serverlist {
+	for _, srv := range s.opts.serverlist {
 		go func(s string) {
 			udpaddr, _ := net.ResolveUDPAddr("udp", s)
 			udpconn, err := net.DialUDP("udp", nil, udpaddr)
